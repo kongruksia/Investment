@@ -1,0 +1,6 @@
+python-telegram-bot==20.7
+anthropic
+finnhub-python
+requests
+apscheduler==3.10.4
+pytz
