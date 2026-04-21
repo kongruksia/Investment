@@ -1,5 +1,4 @@
 import os
-import asyncio
 import anthropic
 import finnhub
 import requests
@@ -10,13 +9,11 @@ import pytz
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
-# Clients
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 finnhub_client = finnhub.Client(api_key=os.environ["FINNHUB_API_KEY"])
 NEWS_API_KEY = os.environ["NEWS_API_KEY"]
 BANGKOK = pytz.timezone("Asia/Bangkok")
 
-# Storage
 user_data = {}
 
 def get_user(user_id):
@@ -44,7 +41,7 @@ def get_stock_price(symbol):
                 "low": quote['l'],
                 "prev_close": quote['pc']
             }
-    except:
+    except Exception:
         pass
     return None
 
@@ -52,6 +49,7 @@ def get_crypto_price(symbol):
     try:
         url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol.upper()}USDT"
         r = requests.get(url, timeout=5)
+        r.raise_for_status()
         data = r.json()
         if 'lastPrice' in data:
             return {
@@ -62,7 +60,7 @@ def get_crypto_price(symbol):
                 "low": float(data['lowPrice']),
                 "volume": float(data['volume'])
             }
-    except:
+    except Exception:
         pass
     return None
 
@@ -70,18 +68,18 @@ def get_news(query, count=1):
     try:
         url = f"https://newsapi.org/v2/everything?q={query}&sortBy=publishedAt&pageSize={count}&apiKey={NEWS_API_KEY}"
         r = requests.get(url, timeout=5)
-        articles = r.json().get('articles', [])
-        return articles
-    except:
+        r.raise_for_status()
+        return r.json().get('articles', [])
+    except Exception:
         return []
 
 def get_top_news():
     try:
         url = f"https://newsapi.org/v2/top-headlines?language=en&pageSize=1&apiKey={NEWS_API_KEY}"
         r = requests.get(url, timeout=5)
-        articles = r.json().get('articles', [])
-        return articles
-    except:
+        r.raise_for_status()
+        return r.json().get('articles', [])
+    except Exception:
         return []
 
 async def analyze_asset(symbol, asset_type="stock"):
@@ -97,14 +95,17 @@ async def analyze_asset(symbol, asset_type="stock"):
 
     news_text = "\n".join([f"- {a['title']}" for a in news[:3]]) if news else "No recent news found."
     trend = "📈" if data['change_pct'] > 0 else "📉"
-    
+
+    prev_close = data.get('prev_close', 'N/A')
+    prev_close_str = f"${prev_close:.2f}" if isinstance(prev_close, (int, float)) else str(prev_close)
+
     prompt = f"""You are an advanced financial analyst. Analyze {symbol} ({asset_type}) with this data:
 
 Current Price: ${data['price']:.2f}
 24h Change: {data['change_pct']:+.2f}%
 24h High: ${data['high']:.2f}
 24h Low: ${data['low']:.2f}
-Previous Close: ${data.get('prev_close', 'N/A')}
+Previous Close: {prev_close_str}
 
 Recent News:
 {news_text}
@@ -120,19 +121,23 @@ Provide a detailed technical analysis with:
 
 Be concise but detailed. Use emojis. Format cleanly."""
 
-    response = claude.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=1500,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    
+    try:
+        response = claude.messages.create(
+            model="claude-opus-4-7",
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        analysis = response.content[0].text
+    except Exception as e:
+        return f"❌ AI analysis failed for {symbol}. Please try again later."
+
     header = (
         f"{trend} *{symbol.upper()} Analysis*\n"
         f"💰 Price: ${data['price']:.2f} ({data['change_pct']:+.2f}%)\n"
         f"📊 H: ${data['high']:.2f} | L: ${data['low']:.2f}\n\n"
     )
-    
-    return header + response.content[0].text
+
+    return header + analysis
 
 async def send_morning_brief(app):
     markets = {
@@ -142,19 +147,22 @@ async def send_morning_brief(app):
     }
     btc = get_crypto_price("BTC")
     eth = get_crypto_price("ETH")
-    
+
     market_text = ""
     for name, data in markets.items():
         if data:
             arrow = "🟢" if data['change_pct'] > 0 else "🔴"
             market_text += f"{arrow} {name}: ${data['price']:.2f} ({data['change_pct']:+.2f}%)\n"
-    
+
     if btc:
         arrow = "🟢" if btc['change_pct'] > 0 else "🔴"
         market_text += f"{arrow} BTC: ${btc['price']:,.0f} ({btc['change_pct']:+.2f}%)\n"
     if eth:
         arrow = "🟢" if eth['change_pct'] > 0 else "🔴"
         market_text += f"{arrow} ETH: ${eth['price']:,.0f} ({eth['change_pct']:+.2f}%)\n"
+
+    if not market_text:
+        market_text = "Market data unavailable.\n"
 
     top_news = get_top_news()
     finance_news = get_news("stock market finance", 1)
@@ -168,17 +176,19 @@ async def send_morning_brief(app):
 
     ai_prompt = f"""Based on today's market data:
 {market_text}
-
 Top news: {news_top}
 
 Give ONE key insight for investors today in 2-3 sentences. Be direct and actionable."""
 
-    ai_response = claude.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=200,
-        messages=[{"role": "user", "content": ai_prompt}]
-    )
-    ai_insight = ai_response.content[0].text
+    try:
+        ai_response = claude.messages.create(
+            model="claude-opus-4-7",
+            max_tokens=200,
+            messages=[{"role": "user", "content": ai_prompt}]
+        )
+        ai_insight = ai_response.content[0].text
+    except Exception:
+        ai_insight = "AI insight unavailable right now."
 
     brief = (
         f"🌅 *Good Morning! Market Brief — {datetime.now(BANGKOK).strftime('%d %b %Y')}*\n\n"
@@ -197,7 +207,7 @@ Give ONE key insight for investors today in 2-3 sentences. Be direct and actiona
                 text=brief,
                 parse_mode="Markdown"
             )
-        except:
+        except Exception:
             pass
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -244,9 +254,9 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = get_stock_price(symbol)
     if not data:
         data = get_crypto_price(symbol)
-        if not data:
-            await update.message.reply_text(f"❌ Could not find price for {symbol}")
-            return
+    if not data:
+        await update.message.reply_text(f"❌ Could not find price for {symbol}")
+        return
     arrow = "🟢" if data['change_pct'] > 0 else "🔴"
     await update.message.reply_text(
         f"{arrow} *{symbol}*\n"
@@ -303,14 +313,14 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ {symbol} not found in watchlist!")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+    msg = update.message.text
     get_user(update.effective_user.id)
 
-    if text == "📊 Market Overview":
+    if msg == "📊 Market Overview":
         await cmd_brief(update, context)
-    elif text == "⭐ My Watchlist":
+    elif msg == "⭐ My Watchlist":
         await cmd_watchlist(update, context)
-    elif text == "📰 Top News":
+    elif msg == "📰 Top News":
         news = get_top_news() + get_news("finance market", 2)
         if news:
             text_out = "📰 *Latest News:*\n\n"
@@ -319,17 +329,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(text_out, parse_mode="Markdown", reply_markup=main_menu())
         else:
             await update.message.reply_text("❌ Could not fetch news right now.", reply_markup=main_menu())
-    elif text == "💡 AI Insight":
+    elif msg == "💡 AI Insight":
         await update.message.reply_text("🤖 Generating AI market insight... ⏳")
-        response = claude.messages.create(
-            model="claude-opus-4-5",
-            max_tokens=300,
-            messages=[{"role": "user", "content": "Give me one actionable investment insight for today's market in 3-4 sentences. Focus on a specific opportunity or risk."}]
-        )
-        await update.message.reply_text(f"💡 *AI Insight:*\n\n{response.content[0].text}", parse_mode="Markdown", reply_markup=main_menu())
-    elif text == "➕ Add Asset":
+        try:
+            response = claude.messages.create(
+                model="claude-opus-4-7",
+                max_tokens=300,
+                messages=[{"role": "user", "content": "Give me one actionable investment insight for today's market in 3-4 sentences. Focus on a specific opportunity or risk."}]
+            )
+            insight = response.content[0].text
+        except Exception:
+            insight = "AI insight unavailable right now. Please try again later."
+        await update.message.reply_text(f"💡 *AI Insight:*\n\n{insight}", parse_mode="Markdown", reply_markup=main_menu())
+    elif msg == "➕ Add Asset":
         await update.message.reply_text("Type: /add SYMBOL\nExample: /add AAPL or /add BTC")
-    elif text == "❌ Remove Asset":
+    elif msg == "❌ Remove Asset":
         await update.message.reply_text("Type: /remove SYMBOL\nExample: /remove AAPL")
     else:
         await update.message.reply_text(

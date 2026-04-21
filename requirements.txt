@@ -1,5 +1,5 @@
 python-telegram-bot==20.7
-anthropic
+anthropic>=0.40.0
 finnhub-python
 requests
 apscheduler==3.10.4
