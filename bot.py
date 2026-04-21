@@ -371,4 +371,15 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("add", cmd_add))
     app.add_handler(CommandHandler("remove", cmd_remove))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.run_polling()
+
+    webhook_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+    if webhook_domain:
+        port = int(os.environ.get("PORT", 8080))
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            webhook_url=f"https://{webhook_domain}",
+            drop_pending_updates=True,
+        )
+    else:
+        app.run_polling(drop_pending_updates=True)
